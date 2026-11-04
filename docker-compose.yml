@@ -2,7 +2,6 @@
 
 x-airflow-common: &airflow-common
   image: apache/airflow:2.9.3-python3.11
-  user: "${AIRFLOW_UID:-50000}:0"
   environment:
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_PG_USER}:${AIRFLOW_PG_PASSWORD}@airflow-postgres/${AIRFLOW_PG_DB}
@@ -139,7 +138,7 @@ services:
     command:
       - -c
       - |
-        airflow db migrate &&
+        set -e; airflow db migrate;
         airflow users create \
           --username ${AIRFLOW_ADMIN_USER} \
           --password ${AIRFLOW_ADMIN_PASSWORD} \
