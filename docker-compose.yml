@@ -1,0 +1,201 @@
+# Manufacturing analytics platform: single entry point (docker compose up -d)
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.9.3-python3.11
+  user: "${AIRFLOW_UID:-50000}:0"
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_PG_USER}:${AIRFLOW_PG_PASSWORD}@airflow-postgres/${AIRFLOW_PG_DB}
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    _PIP_ADDITIONAL_REQUIREMENTS: "clickhouse-connect psycopg2-binary"
+    CLICKHOUSE_HOST: clickhouse
+    CLICKHOUSE_PORT: "8123"
+    CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+    CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    CLICKHOUSE_DB: ${CLICKHOUSE_DB}
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./clickhouse:/opt/airflow/clickhouse:ro
+  depends_on:
+    airflow-postgres:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+
+  # ---------------- Kafka (single node, KRaft) ----------------
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: kafka
+    ports:
+      - "29092:29092"   # host access, e.g. simulator run on the host
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_RETENTION_HOURS: 168
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
+  # One-shot: creates the 10 contracted topics (idempotent)
+  kafka-init:
+    image: apache/kafka:3.8.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./kafka/create-topics.sh:/create-topics.sh:ro
+    entrypoint: ["/bin/bash", "/create-topics.sh"]
+    restart: "no"
+
+  # ---------------- ClickHouse (Bronze / Silver / Gold) ----------------
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: clickhouse
+    ports:
+      - "8123:8123"   # HTTP interface
+      - "9000:9000"   # native TCP interface
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:8123/ping || exit 1"]
+      start_period: 60s
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  # One-shot: applies every clickhouse/ddl/*.sql in order (all idempotent)
+  clickhouse-init:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    volumes:
+      - ./clickhouse/ddl:/ddl:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for f in /ddl/*.sql; do
+          echo "Applying $$f"
+          clickhouse-client --host clickhouse --user "$$CLICKHOUSE_USER" --password "$$CLICKHOUSE_PASSWORD" --multiquery < "$$f"
+        done
+    restart: "no"
+
+  # ---------------- Airflow ----------------
+  airflow-postgres:
+    image: postgres:15-alpine
+    container_name: airflow-postgres
+    environment:
+      POSTGRES_USER: ${AIRFLOW_PG_USER}
+      POSTGRES_PASSWORD: ${AIRFLOW_PG_PASSWORD}
+      POSTGRES_DB: ${AIRFLOW_PG_DB}
+    volumes:
+      - airflow_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # One-shot: db migrate + admin user
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate &&
+        airflow users create \
+          --username ${AIRFLOW_ADMIN_USER} \
+          --password ${AIRFLOW_ADMIN_PASSWORD} \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email ${AIRFLOW_ADMIN_EMAIL} || true
+    restart: "no"
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    command: webserver
+    ports:
+      - "8081:8080"   # 8080 is kept free for the ERP simulator
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ---------------- Superset ----------------
+  superset:
+    image: apache/superset:3.1.3
+    container_name: superset
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+    ports:
+      - "8088:8088"
+    volumes:
+      - superset_home:/app/superset_home
+    command: >
+      /bin/bash -c "
+      pip install clickhouse-connect &&
+      superset db upgrade &&
+      superset fab create-admin --username ${SUPERSET_ADMIN_USER} --firstname Admin --lastname User --email ${SUPERSET_ADMIN_EMAIL} --password ${SUPERSET_ADMIN_PASSWORD} || true &&
+      superset init &&
+      superset run -h 0.0.0.0 -p 8088
+      "
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  default:
+    name: mfg-net
+
+volumes:
+  kafka_data:
+  clickhouse_data:
+  airflow_pg_data:
+  superset_home:
