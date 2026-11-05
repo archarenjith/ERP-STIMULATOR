@@ -151,7 +151,8 @@ services:
   airflow-webserver:
     <<: *airflow-common
     container_name: airflow-webserver
-    command: webserver
+    entrypoint: ["/bin/bash", "-c"]
+    command: ["rm -f /opt/airflow/airflow-webserver.pid && exec /entrypoint webserver"]
     ports:
       - "8081:8080"   # 8080 is kept free for the ERP simulator
     depends_on:
