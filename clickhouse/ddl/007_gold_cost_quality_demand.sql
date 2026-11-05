@@ -4,14 +4,14 @@
 CREATE OR REPLACE VIEW mfg_gold.cost_daily AS
 SELECT
     day,
-    round(sum(labour_cost), 2)      AS labour_cost,
-    round(sum(electricity_cost), 2) AS electricity_cost,
-    round(sum(material_cost), 2)    AS material_cost,
-    round(sum(labour_cost) + sum(electricity_cost) + sum(material_cost), 2) AS total_cost
+    round(sum(l_cost), 2) AS labour_cost,
+    round(sum(e_cost), 2) AS electricity_cost,
+    round(sum(m_cost), 2) AS material_cost,
+    round(sum(l_cost) + sum(e_cost) + sum(m_cost), 2) AS total_cost
 FROM
 (
-    SELECT toDate(event_ts) AS day, minutes_worked / 60 * hourly_cost AS labour_cost,
-           0. AS electricity_cost, 0. AS material_cost
+    SELECT toDate(event_ts) AS day, minutes_worked / 60 * hourly_cost AS l_cost,
+           0. AS e_cost, 0. AS m_cost
     FROM mfg_silver.v_labour_bookings_current
     UNION ALL
     SELECT toDate(event_ts), 0., energy_kwh * tariff_per_kwh, 0.
@@ -28,12 +28,12 @@ CREATE OR REPLACE VIEW mfg_gold.cost_by_machine AS
 SELECT
     c.machine_id AS machine_id,
     m.ma_name    AS machine_name,
-    round(sum(c.labour_cost), 2)      AS labour_cost,
-    round(sum(c.electricity_cost), 2) AS electricity_cost,
-    round(sum(c.labour_cost) + sum(c.electricity_cost), 2) AS total_cost
+    round(sum(c.l_cost), 2) AS labour_cost,
+    round(sum(c.e_cost), 2) AS electricity_cost,
+    round(sum(c.l_cost) + sum(c.e_cost), 2) AS total_cost
 FROM
 (
-    SELECT machine_id, minutes_worked / 60 * hourly_cost AS labour_cost, 0. AS electricity_cost
+    SELECT machine_id, minutes_worked / 60 * hourly_cost AS l_cost, 0. AS e_cost
     FROM mfg_silver.v_labour_bookings_current
     UNION ALL
     SELECT machine_id, 0., energy_kwh * tariff_per_kwh
@@ -103,6 +103,6 @@ SELECT
     sum(shipped_quantity) AS shipped_quantity,
     sum(open_quantity) AS open_quantity,
     round(sum(order_value), 2) AS order_value,
-    round(100 * sum(shipped_quantity) / nullIf(sum(ordered_quantity), 0), 1) AS fulfilment_pct
+    round(100 * shipped_quantity / nullIf(ordered_quantity, 0), 1) AS fulfilment_pct
 FROM mfg_gold.sales_orders_status
 GROUP BY product_id;
