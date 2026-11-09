@@ -92,6 +92,7 @@ default_args = {
     "owner": "data-eng",
     "retries": 2,
     "retry_delay": timedelta(seconds=10),
+    "execution_timeout": timedelta(minutes=2),
 }
 
 with DAG(
