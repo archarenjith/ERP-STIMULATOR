@@ -21,3 +21,15 @@ Airflow runs the pipeline `mfg_pipeline` every minute.
 
 ## Limits
 OEE and inventory balances are approximations because the source events do not carry every needed field.
+
+## Start the simulator
+
+The ERP simulator is included in the `simulator/` folder. Start the platform first, then:
+
+```bash
+docker build -t manufacturing-erp-simulator ./simulator
+docker run -d --name erp-simulator --network mfg-net -p 8080:8080 \
+  -e KAFKA_BOOTSTRAP_SERVERS=kafka:9092 manufacturing-erp-simulator
+curl http://localhost:8080/healthz
+curl -X POST http://localhost:8080/api/v1/stream/start
+```
