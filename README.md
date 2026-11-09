@@ -4,7 +4,7 @@ Data flows: ERP simulator -> Kafka -> ClickHouse (Bronze, Silver, Gold) -> Super
 Airflow runs the pipeline `mfg_pipeline` every minute.
 
 ## How to start
-1. Copy the settings file: cp .env.example .env
+1. Copy the settings file (cp .env.example .env), then replace every change_me with a real value
 2. Start everything: docker compose up -d
 3. Start the simulator and then live data: curl -X POST http://localhost:8080/api/v1/stream/start
 
